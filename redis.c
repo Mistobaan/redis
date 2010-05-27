@@ -77,6 +77,7 @@
 #include "zipmap.h" /* Compact dictionary-alike data structure */
 #include "sha1.h"   /* SHA1 is used for DEBUG DIGEST */
 #include "release.h" /* Release and/or git repository information */
+#include "gpusort.h"
 
 /* Error codes */
 #define REDIS_OK                0
@@ -6935,6 +6936,27 @@ static robj *lookupKeyByPattern(redisDb *db, robj *pattern, robj *subst) {
     return o;
 }
 
+static inline void gpuSort(redisSortObject *vector, int vectorlen) {
+    float *keys = zmalloc(sizeof(float)*vectorlen);
+    robj **values = zmalloc(sizeof(robj*)*vectorlen);
+    int i;
+    if (server.sort_desc)
+        for (i = 0; i < vectorlen; ++i) {
+            keys[i] = -vector[i].u.score;
+            values[i] = vector[i].obj;
+        }
+    else
+        for (i = 0; i < vectorlen; ++i) {
+            keys[i] = vector[i].u.score;
+            values[i] = vector[i].obj;
+        }
+    runSortingKernel(keys, (int*) values, vectorlen);
+    zfree(keys);
+    for (i = 0; i < vectorlen; ++i)
+        vector[i].obj = values[i];
+    zfree(values);
+}
+
 /* sortCompare() is used by qsort in sortCommand(). Given that qsort_r with
  * the additional parameter is not standard but a BSD-specific we have to
  * pass sorting parameters via the global 'server' structure */
@@ -7144,6 +7166,8 @@ static void sortCommand(redisClient *c) {
         server.sort_bypattern = sortby ? 1 : 0;
         if (sortby && (start != 0 || end != vectorlen-1))
             pqsort(vector,vectorlen,sizeof(redisSortObject),sortCompare, start,end);
+        else if (!alpha && vectorlen >= 50000)
+            gpuSort(vector, vectorlen);
         else
             qsort(vector,vectorlen,sizeof(redisSortObject),sortCompare);
     }
